@@ -4,7 +4,7 @@ const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 const state = {
   view: "network", page: 1, pageSize: 5, group: "All",
   alpha: .05, logScale: true, data: null, angle: 0, tilt: -.22, zoom: 1,
-  dragging: false, lastX: 0, lastY: 0, pointer: null,
+  dragging: false, lastX: 0, lastY: 0, pointer: null, sceneStarted: 0,
 };
 const sceneInfo = {
   network: ["TRAFFIC TOPOLOGY / 3D NETWORK MAP", "A living network"],
@@ -29,10 +29,6 @@ function fmt(value, digits = 1) {
 function compact(value) {
   return new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 }).format(value);
 }
-function superscript(value) {
-  return String(value).replace(/-/g, "⁻").replace(/\d/g, (digit) => "⁰¹²³⁴⁵⁶⁷⁸⁹"[digit]);
-}
-
 async function refresh() {
   const params = new URLSearchParams({
     alpha: state.alpha, top_n: 8, page: state.page, page_size: state.pageSize,
@@ -52,11 +48,9 @@ async function refresh() {
 function render(data) {
   $("#source").textContent = data.source.toUpperCase();
   $("#source-detail").textContent = data.source;
-  $("#total-count").textContent = number.format(data.counts.all);
-  $("#normal-count").textContent = number.format(data.counts.normal);
-  $("#malicious-count").textContent = number.format(data.counts.malicious);
-  $("#scene-value-a").textContent = number.format(data.counts.normal);
-  $("#scene-value-b").textContent = number.format(data.counts.malicious);
+  animateNumber($("#total-count"), data.counts.all);
+  animateNumber($("#normal-count"), data.counts.normal);
+  animateNumber($("#malicious-count"), data.counts.malicious);
   $("#packet-gap").textContent = `${data.test.difference > 0 ? "+" : ""}${compact(data.test.difference)}`;
   const packetMax = Math.max(data.packets.normal.mean, data.packets.malicious.mean, 1);
   $("#mean-normal").style.width = `${data.packets.normal.mean / packetMax * 100}%`;
@@ -71,8 +65,35 @@ function render(data) {
   $("#test-decision").classList.toggle("nonsig", !data.test.significant);
   renderTable(data.table);
   renderNotices(data);
+  state.sceneStarted = performance.now();
+  animateSceneEntry();
   updateSceneLabels();
   drawScene();
+}
+
+function animateSceneEntry() {
+  const scene = $(".scene");
+  scene.classList.remove("scene-arrive");
+  void scene.offsetWidth;
+  scene.classList.add("scene-arrive");
+}
+
+function animateNumber(element, target) {
+  if (reducedMotion.matches) {
+    element.textContent = number.format(target);
+    return;
+  }
+  const start = performance.now();
+  const duration = 850;
+  const from = Number(element.dataset.value || 0);
+  element.dataset.value = String(target);
+  const tick = (time) => {
+    const progress = Math.min(1, (time - start) / duration);
+    const eased = 1 - (1 - progress) ** 4;
+    element.textContent = number.format(Math.round(from + (target - from) * eased));
+    if (progress < 1) requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
 }
 
 function renderNotices(data) {
@@ -86,18 +107,17 @@ function renderNotices(data) {
 }
 
 function renderTable(table) {
-  const columns = ["proto", "spkts", "dpkts", "total_packets", "dur", "group"];
-  const labels = { proto: "PROTOCOL", spkts: "SRC PKTS", dpkts: "DST PKTS", total_packets: "TOTAL", dur: "DURATION", group: "CLASS" };
-  $("#table-head").innerHTML = `<tr>${columns.map((column) => `<th>${labels[column]}</th>`).join("")}</tr>`;
-  $("#table-body").innerHTML = table.records.length ? table.records.map((record) =>
-    `<tr>${columns.map((column) => {
-      const value = record[column];
-      if (column === "group") return `<td><span class="class-chip ${value === "Malicious" ? "malicious" : ""}">${esc(value)}</span></td>`;
-      if (["spkts", "dpkts", "total_packets"].includes(column)) return `<td>${number.format(Number(value) || 0)}</td>`;
-      if (column === "dur") return `<td>${fmt(value, 4)}</td>`;
-      return `<td>${esc(value)}</td>`;
-    }).join("")}</tr>`
-  ).join("") : '<tr><td class="empty" colspan="6">No flow records.</td></tr>';
+  $("#flow-deck").innerHTML = table.records.length ? table.records.map((record, index) => {
+    const malicious = record.group === "Malicious";
+    const packets = (Number(record.spkts) || 0) + (Number(record.dpkts) || 0);
+    return `<article class="flow-card ${malicious ? "is-malicious" : "is-normal"}" style="--card-index:${index};--depth:${(table.records.length - index) * 5}px" tabindex="0">` +
+      `<div class="flow-card-top"><span class="flow-id">FLOW / ${String((table.page - 1) * table.page_size + index + 1).padStart(5, "0")}</span><span class="flow-class"><i></i>${malicious ? "MALICIOUS" : "NORMAL"}</span></div>` +
+      `<div class="flow-card-main"><div class="flow-protocol"><small>PROTOCOL</small><b>${esc(record.proto || "unknown")}</b></div>` +
+      `<div class="flow-measure"><small>PACKETS</small><b>${number.format(packets)}</b><span>${number.format(Number(record.spkts) || 0)} ↑ &nbsp; ${number.format(Number(record.dpkts) || 0)} ↓</span></div>` +
+      `<div class="flow-measure"><small>DURATION</small><b>${fmt(record.dur, 3)}<em> sec</em></b></div>` +
+      `<div class="flow-measure flow-volume"><small>PAYLOAD</small><b>${compact((Number(record.sbytes) || 0) + (Number(record.dbytes) || 0))}<em> bytes</em></b></div></div>` +
+      `<div class="flow-signal"><i></i></div></article>`;
+  }).join("") : '<div class="flow-empty">No flows match this filter.</div>';
   const first = table.total ? (table.page - 1) * table.page_size + 1 : 0;
   const last = Math.min(table.page * table.page_size, table.total);
   $("#table-count").textContent = `${number.format(first)}–${number.format(last)} / ${number.format(table.total)}`;
@@ -191,7 +211,7 @@ function drawFloor() {
   line3d({ x: -6, y: -2.35, z: 0 }, { x: 6, y: -2.35, z: 0 }, "#c9f36a", .28, 1.2);
 }
 
-function drawCube(x, z, h, color) {
+function drawCube(x, z, h, color, time, phase) {
   const w = .22, d = .25, bottom = -2.35, top = bottom + h;
   const points = [
     { x: x-w, y: bottom, z: z-d }, { x: x+w, y: bottom, z: z-d },
@@ -211,9 +231,31 @@ function drawCube(x, z, h, color) {
   ctx.shadowBlur = 12;
   polygon(topFace, color, .86);
   ctx.restore();
+  const point = project({ x, y: top + .1 + Math.sin(time * .003 + phase) * .12, z });
+  const beamBase = project({ x, y: top, z });
+  ctx.beginPath();
+  ctx.moveTo(beamBase.x, beamBase.y);
+  ctx.lineTo(point.x, point.y - 5);
+  ctx.strokeStyle = color;
+  ctx.globalAlpha = .18 + .12 * Math.sin(time * .002 + phase);
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+  const halo = ctx.createRadialGradient(point.x, point.y, 0, point.x, point.y, 10);
+  halo.addColorStop(0, `${color}cc`);
+  halo.addColorStop(1, `${color}00`);
+  ctx.fillStyle = halo;
+  ctx.fillRect(point.x - 10, point.y - 10, 20, 20);
+  ctx.beginPath();
+  ctx.arc(point.x, point.y, 2, 0, Math.PI * 2);
+  ctx.fillStyle = "#f4ffd8";
+  ctx.shadowColor = color;
+  ctx.shadowBlur = 12;
+  ctx.fill();
+  ctx.shadowBlur = 0;
 }
 
-function drawBars() {
+function drawBars(time) {
   const data = state.data;
   if (!data) return;
   drawFloor();
@@ -240,6 +282,8 @@ function drawBars() {
   const values = groups.flatMap((group) => [group.normal, group.malicious]);
   const maximum = Math.max(...values, 1);
   const floor = -2.35;
+  const elapsed = reducedMotion.matches ? 1000 : Math.max(0, time - state.sceneStarted);
+  const progress = 1 - (1 - Math.min(1, elapsed / 780)) ** 3;
   groups.forEach((group, index) => {
     const factor = state.logScale && state.view === "packets"
       ? Math.log1p(Math.max(0, group.normal)) / Math.log1p(maximum)
@@ -247,10 +291,10 @@ function drawBars() {
     const maliciousFactor = state.logScale && state.view === "packets"
       ? Math.log1p(Math.max(0, group.malicious)) / Math.log1p(maximum)
       : group.malicious / maximum;
-    const normalHeight = .16 + factor * 3;
-    const maliciousHeight = .16 + maliciousFactor * 3;
-    drawCube(group.x, -.58, normalHeight, "#c9f36a");
-    drawCube(group.x, .58, maliciousHeight, "#ff765e");
+    const normalHeight = (.16 + factor * 3) * progress;
+    const maliciousHeight = (.16 + maliciousFactor * 3) * progress;
+    drawCube(group.x, -.58, normalHeight, "#c9f36a", time, index);
+    drawCube(group.x, .58, maliciousHeight, "#ff765e", time, index + 2.5);
     const label = state.view === "packets" ? String(index + 1).padStart(2, "0") : group.name;
     const p = project({ x: group.x, y: floor - .22, z: 0 });
     ctx.save();
@@ -284,6 +328,29 @@ function drawNetwork(time) {
   ctx.lineWidth = 1;
   ctx.stroke();
   ctx.restore();
+  const sweepAngle = time * .00042;
+  const center = project({ x: 0, y: 0, z: 0 });
+  const sweepEnd = project({
+    x: Math.cos(sweepAngle) * radius * 1.08,
+    y: Math.sin(sweepAngle) * radius * 1.08,
+    z: 0,
+  });
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(width * .51, height * .53, Math.min(width, height) * .345 * state.zoom, 0, Math.PI * 2);
+  ctx.clip();
+  const sweepGlow = ctx.createLinearGradient(center.x, center.y, sweepEnd.x, sweepEnd.y);
+  sweepGlow.addColorStop(0, "#c9f36a00");
+  sweepGlow.addColorStop(1, "#c9f36a55");
+  ctx.beginPath();
+  ctx.moveTo(center.x, center.y);
+  ctx.lineTo(sweepEnd.x, sweepEnd.y);
+  ctx.strokeStyle = sweepGlow;
+  ctx.lineWidth = 2;
+  ctx.shadowColor = "#c9f36a";
+  ctx.shadowBlur = 15;
+  ctx.stroke();
+  ctx.restore();
   const links = [];
   points.forEach((point, index) => {
     [1, 5, 11].forEach((offset) => {
@@ -310,20 +377,22 @@ function drawNetwork(time) {
     ctx.globalAlpha = 1;
     ctx.shadowBlur = 0;
   });
-  const pulseIndex = Math.floor(time / 34) % points.length;
-  const a = project(points[pulseIndex]), b = project(points[(pulseIndex + 5) % points.length]);
-  const progress = (time % 3400) / 3400;
-  const x = a.x + (b.x - a.x) * progress, y = a.y + (b.y - a.y) * progress;
-  const glow = ctx.createRadialGradient(x, y, 0, x, y, 15);
-  glow.addColorStop(0, "#fff8d8dd"); glow.addColorStop(.15, "#c9f36a99"); glow.addColorStop(1, "#c9f36a00");
-  ctx.fillStyle = glow; ctx.fillRect(x - 15, y - 15, 30, 30);
+  for (let pulse = 0; pulse < 8; pulse++) {
+    const pulseIndex = Math.floor(time / 34 + pulse * 11) % points.length;
+    const a = project(points[pulseIndex]), b = project(points[(pulseIndex + 5) % points.length]);
+    const progress = (time / 1800 + pulse * .137) % 1;
+    const x = a.x + (b.x - a.x) * progress, y = a.y + (b.y - a.y) * progress;
+    const glow = ctx.createRadialGradient(x, y, 0, x, y, 12);
+    glow.addColorStop(0, "#fff8d8dd"); glow.addColorStop(.15, "#c9f36a99"); glow.addColorStop(1, "#c9f36a00");
+    ctx.fillStyle = glow; ctx.fillRect(x - 12, y - 12, 24, 24);
+  }
 }
 
 function drawScene(time = 0) {
   if (!width || !height || state.view === "flows") return;
   ctx.clearRect(0, 0, width, height);
   if (state.view === "network") drawNetwork(time);
-  else drawBars();
+  else drawBars(time);
 }
 
 function animate(time) {
@@ -334,9 +403,18 @@ function animate(time) {
   if (state.view !== "flows" && !document.hidden && !reducedMotion.matches) frame = requestAnimationFrame(animate);
 }
 
+document.addEventListener("visibilitychange", () => {
+  cancelAnimationFrame(frame);
+  if (!document.hidden && !reducedMotion.matches && state.view !== "flows") {
+    frame = requestAnimationFrame(animate);
+  }
+});
+
 function switchView(view) {
   state.view = view;
   updateSceneLabels();
+  animateSceneEntry();
+  state.sceneStarted = performance.now();
   if (view === "flows") cancelAnimationFrame(frame);
   else if (!reducedMotion.matches) {
     cancelAnimationFrame(frame);
@@ -433,7 +511,7 @@ reducedMotion.addEventListener("change", () => {
   cancelAnimationFrame(frame); cancelAnimationFrame(ambientFrame);
   if (reducedMotion.matches) { drawScene(); }
   else {
-    if (state.view === "network") frame = requestAnimationFrame(animate);
+    if (state.view !== "flows") frame = requestAnimationFrame(animate);
     resumeAmbient();
   }
 });
