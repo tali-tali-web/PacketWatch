@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101416">
+  <title>PacketWatch — Traffic observatory</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <canvas id="signal-field" aria-hidden="true"></canvas>
+  <div class="shell">
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="PacketWatch home">
+        <span class="brand-mark"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M5 18h5l3-9 5 16 4-11 2 4h3"/></svg></span>
+        <span>PACKET<span class="brand-light">WATCH</span></span>
+      </a>
+      <div class="top-meta"><span class="status-pip"></span><span id="source">CONNECTING</span><span class="meta-divider"></span><span>FLOW OBSERVATORY <b>01</b></span></div>
+    </header>
+
+    <nav class="tabs" role="tablist" aria-label="Dashboard views">
+      <span class="tab-indicator" aria-hidden="true"></span>
+      <button class="tab active" role="tab" aria-controls="scene" aria-selected="true" data-view="network"><span>01</span> Network</button>
+      <button class="tab" role="tab" aria-controls="scene" aria-selected="false" data-view="packets"><span>02</span> Packet volume</button>
+      <button class="tab" role="tab" aria-controls="scene" aria-selected="false" data-view="protocols"><span>03</span> Protocols</button>
+      <button class="tab" role="tab" aria-controls="scene" aria-selected="false" data-view="flows"><span>04</span> Flow log</button>
+      <div class="tab-context"><i></i> LIVE ANALYSIS</div>
+    </nav>
+
+    <main class="workspace">
+      <section class="viewport">
+        <div class="scene-heading">
+          <div><div class="eyebrow" id="scene-kicker">TRAFFIC TOPOLOGY / 3D NETWORK MAP</div><h1 id="scene-title">A living network</h1></div>
+          <div class="scene-tools">
+            <label id="scale-control" class="scale-control"><input id="log-scale" type="checkbox" checked><span class="switch"></span> LOG</label>
+            <div class="scene-index"><b id="scene-number">01</b><span>/ 04</span></div>
+          </div>
+        </div>
+
+        <div class="scene" id="scene" role="tabpanel" aria-label="Network traffic visualization">
+          <canvas id="scene-canvas" role="img" aria-label="Interactive three dimensional traffic visualization"></canvas>
+          <div class="scene-vignette" id="scene-vignette"></div>
+          <div class="scene-label scene-label-a"><span class="legend-dot normal"></span><span id="scene-label-a">NORMAL FLOWS</span><b id="scene-value-a">—</b></div>
+          <div class="scene-label scene-label-b"><span class="legend-dot malicious"></span><span id="scene-label-b">MALICIOUS FLOWS</span><b id="scene-value-b">—</b></div>
+          <div id="flow-view" class="flow-view" hidden>
+            <div class="flow-toolbar"><span>RECENT CONNECTIONS</span><label>CLASS <select id="group-filter"><option>All</option><option>Normal</option><option>Malicious</option></select></label></div>
+            <div class="table-wrap"><table><thead id="table-head"></thead><tbody id="table-body"></tbody></table></div>
+            <div class="table-footer"><span id="table-count">—</span><div class="pager"><button id="prev-page" aria-label="Previous page">←</button><span id="page-indicator">—</span><button id="next-page" aria-label="Next page">→</button></div></div>
+          </div>
+          <div id="scene-note" class="scene-note">ROTATE / DRAG TO INSPECT</div>
+          <div class="scene-coordinates"><span>LIVE VIEWPORT</span><span id="frame-rate">60 FPS</span></div>
+        </div>
+        <div class="viewport-footer"><span><i class="legend-dot normal"></i> NORMAL TRAFFIC</span><span><i class="legend-dot malicious"></i> MALICIOUS TRAFFIC</span><span class="footer-hint">DRAG TO ROTATE <b>·</b> SCROLL TO ZOOM</span></div>
+      </section>
+
+      <aside class="inspector">
+        <div class="inspector-head"><div class="eyebrow">DATA INSPECTOR</div><span class="inspector-live">ACTIVE</span></div>
+        <div class="flow-count"><span>TOTAL OBSERVED</span><strong id="total-count">—</strong><small>flows in dataset</small></div>
+        <div class="class-counts">
+          <div><span><i class="legend-dot normal"></i> NORMAL</span><b id="normal-count">—</b></div>
+          <div><span><i class="legend-dot malicious"></i> MALICIOUS</span><b id="malicious-count">—</b></div>
+        </div>
+        <div class="inspector-rule"></div>
+        <div class="eyebrow">PACKET VOLUME / MEAN</div>
+        <div class="delta-value" id="packet-gap">—</div>
+        <div class="delta-caption">NORMAL − MALICIOUS PACKETS</div>
+        <div class="mini-bars">
+          <div><span>Normal</span><i class="mini-track"><i id="mean-normal" class="mini-fill normal"></i></i><b id="mean-normal-value">—</b></div>
+          <div><span>Malicious</span><i class="mini-track"><i id="mean-malicious" class="mini-fill malicious"></i></i><b id="mean-malicious-value">—</b></div>
+        </div>
+        <div class="inspector-rule"></div>
+        <div class="test-heading"><div><div class="eyebrow">WELCH'S T-TEST</div><b>Signal significance</b></div><select id="alpha" aria-label="Significance level"><option value="0.05">α .05</option><option value="0.01">α .01</option><option value="0.1">α .10</option></select></div>
+        <div class="p-value"><span>P-VALUE</span><strong id="p-value">—</strong></div>
+        <div class="decision" id="test-decision">—</div>
+        <div class="test-row"><span>Welch t</span><b id="t-stat">—</b></div>
+        <div class="test-row"><span>95% CI</span><b id="ci">—</b></div>
+        <div class="test-row"><span>Cohen's d</span><b id="effect">—</b></div>
+        <div class="inspector-bottom"><span>DATA SOURCE</span><b id="source-detail">—</b></div>
+      </aside>
+    </main>
+    <div id="notices" class="notices"></div>
+    <footer><span>PACKETWATCH <i>/</i> FLOW OBSERVATORY</span><span>UNSW-NB15 · DESCRIPTIVE, NOT PREDICTIVE</span></footer>
+  </div>
+  <script src="/app.js" defer></script>
+</body>
+</html>
