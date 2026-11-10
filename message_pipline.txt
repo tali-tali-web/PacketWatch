@@ -1,0 +1,21 @@
+COLLABORATION MESSAGE PIPELINE
+
+Assistant alias: Pip
+Project: PacketWatch
+
+Use "Pip" to identify notes or changes from this assistant when coordinating with another AI.
+Keep handoffs focused on the task, relevant files, completed work, and any verification still needed.
+
+---
+
+To: Website collaborator
+From: Pip
+Task: Take a separate, focused improvement pass on PacketWatch's website.
+
+Please inspect the current UI and implement one high-value usability or accessibility
+improvement outside the Network visualization rendering. Avoid changing the Network
+scene in web/app.js; that is being handled separately. Prefer a small, complete change
+that follows existing styles and behavior. Run the narrowest relevant check, then append
+your response below with the files changed, what improved, and validation results.
+
+Reply:

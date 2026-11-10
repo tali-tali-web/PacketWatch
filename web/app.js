@@ -177,10 +177,10 @@ function project(point, scale = 1) {
   const z = point.x * sinY + point.z * cosY;
   const y = point.y * cosX - z * sinX;
   const depth = point.y * sinX + z * cosX;
-  const camera = 15;
-  const perspective = camera / (camera + depth);
+  const camera = 18;
+  const perspective = camera / (camera - depth);
   const unit = Math.min(width, height) * .105 * state.zoom * scale;
-  return { x: width * .51 + x * unit * perspective, y: height * .53 - y * unit * perspective, depth };
+  return { x: width * .51 + x * unit * perspective, y: height * .53 - y * unit * perspective, depth, perspective };
 }
 
 function polygon(points, color, alpha = 1) {
@@ -284,7 +284,11 @@ function drawBars(time) {
   const floor = -2.35;
   const elapsed = reducedMotion.matches ? 1000 : Math.max(0, time - state.sceneStarted);
   const progress = 1 - (1 - Math.min(1, elapsed / 780)) ** 3;
-  groups.forEach((group, index) => {
+  const ordered = groups.map((group, index) => {
+    const depth = project({ x: group.x, y: 0, z: 0 }).depth;
+    return { ...group, index, depth };
+  }).sort((a, b) => a.depth - b.depth);
+  ordered.forEach((group, index) => {
     const factor = state.logScale && state.view === "packets"
       ? Math.log1p(Math.max(0, group.normal)) / Math.log1p(maximum)
       : group.normal / maximum;
@@ -293,9 +297,9 @@ function drawBars(time) {
       : group.malicious / maximum;
     const normalHeight = (.16 + factor * 3) * progress;
     const maliciousHeight = (.16 + maliciousFactor * 3) * progress;
-    drawCube(group.x, -.58, normalHeight, "#c9f36a", time, index);
-    drawCube(group.x, .58, maliciousHeight, "#ff765e", time, index + 2.5);
-    const label = state.view === "packets" ? String(index + 1).padStart(2, "0") : group.name;
+    drawCube(group.x, -.58, normalHeight, "#c9f36a", time, group.index);
+    drawCube(group.x, .58, maliciousHeight, "#ff765e", time, group.index + 2.5);
+    const label = state.view === "packets" ? String(group.index + 1).padStart(2, "0") : group.name;
     const p = project({ x: group.x, y: floor - .22, z: 0 });
     ctx.save();
     ctx.fillStyle = "#849088";
@@ -310,7 +314,6 @@ function drawNetwork(time) {
   const count = 84;
   const points = [];
   const golden = Math.PI * (3 - Math.sqrt(5));
-  const rotation = state.angle;
   const radius = 3.25;
   const normalShare = state.data
     ? state.data.counts.normal / state.data.counts.all
@@ -318,73 +321,154 @@ function drawNetwork(time) {
   for (let i = 0; i < count; i++) {
     const y = 1 - (i / (count - 1)) * 2;
     const r = Math.sqrt(1 - y * y);
-    const theta = golden * i + rotation;
+    const theta = golden * i;
     points.push({ x: Math.cos(theta) * r * radius, y: y * radius, z: Math.sin(theta) * r * radius });
   }
+
+  const centerX = width * .51;
+  const centerY = height * .53;
+  const globeRadius = Math.min(width, height) * .34 * state.zoom;
+  const surface = ctx.createRadialGradient(
+    centerX - globeRadius * .25, centerY - globeRadius * .32, globeRadius * .08,
+    centerX, centerY, globeRadius,
+  );
+  surface.addColorStop(0, "#26302a55");
+  surface.addColorStop(.72, "#1a22201c");
+  surface.addColorStop(1, "#10151600");
   ctx.save();
   ctx.beginPath();
-  ctx.arc(width * .51, height * .53, Math.min(width, height) * .345 * state.zoom, 0, Math.PI * 2);
-  ctx.strokeStyle = "#c9f36a22";
+  ctx.arc(centerX, centerY, globeRadius, 0, Math.PI * 2);
+  ctx.fillStyle = surface;
+  ctx.fill();
+  ctx.strokeStyle = "#b8c5b52b";
   ctx.lineWidth = 1;
   ctx.stroke();
   ctx.restore();
-  const sweepAngle = time * .00042;
-  const center = project({ x: 0, y: 0, z: 0 });
-  const sweepEnd = project({
-    x: Math.cos(sweepAngle) * radius * 1.08,
-    y: Math.sin(sweepAngle) * radius * 1.08,
-    z: 0,
-  });
-  ctx.save();
-  ctx.beginPath();
-  ctx.arc(width * .51, height * .53, Math.min(width, height) * .345 * state.zoom, 0, Math.PI * 2);
-  ctx.clip();
-  const sweepGlow = ctx.createLinearGradient(center.x, center.y, sweepEnd.x, sweepEnd.y);
-  sweepGlow.addColorStop(0, "#c9f36a00");
-  sweepGlow.addColorStop(1, "#c9f36a55");
-  ctx.beginPath();
-  ctx.moveTo(center.x, center.y);
-  ctx.lineTo(sweepEnd.x, sweepEnd.y);
-  ctx.strokeStyle = sweepGlow;
-  ctx.lineWidth = 2;
-  ctx.shadowColor = "#c9f36a";
-  ctx.shadowBlur = 15;
-  ctx.stroke();
-  ctx.restore();
+
+  const rearGrid = [];
+  const frontGrid = [];
+  const addGridRing = (samples) => {
+    const projected = samples.map((point) => ({ ...project(point), world: point }));
+    for (let i = 0; i < projected.length - 1; i++) {
+      const a = projected[i];
+      const b = projected[i + 1];
+      const segment = { a, b };
+      ((a.depth + b.depth) / 2 >= 0 ? frontGrid : rearGrid).push(segment);
+    }
+  };
+  for (let latitude = -2; latitude <= 2; latitude++) {
+    const phi = latitude * Math.PI / 7;
+    const ringRadius = Math.cos(phi) * radius;
+    const y = Math.sin(phi) * radius;
+    const samples = [];
+    for (let i = 0; i <= 96; i++) {
+      const theta = i / 96 * Math.PI * 2;
+      samples.push({ x: Math.cos(theta) * ringRadius, y, z: Math.sin(theta) * ringRadius });
+    }
+    addGridRing(samples);
+  }
+  for (let meridian = 0; meridian < 10; meridian++) {
+    const theta = meridian / 10 * Math.PI;
+    const samples = [];
+    for (let i = 0; i <= 64; i++) {
+      const phi = -Math.PI / 2 + i / 64 * Math.PI;
+      const ringRadius = Math.cos(phi) * radius;
+      samples.push({
+        x: Math.cos(theta) * ringRadius,
+        y: Math.sin(phi) * radius,
+        z: Math.sin(theta) * ringRadius,
+      });
+    }
+    addGridRing(samples);
+  }
+  const drawGridSegments = (segments, color, alpha, dash) => {
+    ctx.save();
+    ctx.beginPath();
+    for (const { a, b } of segments) {
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+    }
+    ctx.strokeStyle = color;
+    ctx.globalAlpha = alpha;
+    ctx.lineWidth = .7;
+    ctx.setLineDash(dash);
+    ctx.stroke();
+    ctx.restore();
+  };
+  drawGridSegments(rearGrid, "#9dad9d", .16, [2, 5]);
+
+  const projected = points.map((point, index) => ({
+    ...point,
+    world: point,
+    index,
+    ...project(point),
+    color: (index * 37 % count) < count * normalShare ? "#c9f36a" : "#ff765e",
+  }));
   const links = [];
-  points.forEach((point, index) => {
-    [1, 5, 11].forEach((offset) => {
-      const target = points[(index + offset) % points.length];
-      const depth = (project(point).depth + project(target).depth) / 2;
-      links.push({ point, target, depth });
+  projected.forEach((point, index) => {
+    const nearest = projected
+      .filter((target) => target.index !== index)
+      .map((target) => ({
+        target,
+        distance: (point.world.x - target.world.x) ** 2
+          + (point.world.y - target.world.y) ** 2
+          + (point.world.z - target.world.z) ** 2,
+      }))
+      .sort((a, b) => a.distance - b.distance)
+      .slice(0, 2);
+    nearest.forEach(({ target }) => {
+      if (point.index < target.index) links.push({
+        point,
+        target,
+        depth: (point.depth + target.depth) / 2,
+      });
     });
   });
   links.sort((a, b) => a.depth - b.depth).forEach(({ point, target, depth }) => {
-    const front = depth < 0;
-    line3d(point, target, front ? "#a4c782" : "#6e8b78", front ? .19 : .06, front ? .8 : .55);
-  });
-  points.forEach((point, index) => {
-    const p = project(point);
-    const visibility = Math.max(.18, Math.min(1, .6 - p.depth / 9));
-    const color = index < count * normalShare ? "#c9f36a" : "#ff765e";
+    if (depth >= 0) return;
     ctx.beginPath();
-    ctx.arc(p.x, p.y, 1.5, 0, Math.PI * 2);
-    ctx.fillStyle = color;
-    ctx.globalAlpha = visibility;
-    ctx.shadowColor = color;
-    ctx.shadowBlur = 7;
+    ctx.moveTo(point.x, point.y);
+    ctx.lineTo(target.x, target.y);
+    ctx.strokeStyle = depth >= 0 ? "#a4b99e" : "#87958a";
+    ctx.globalAlpha = depth >= 0 ? .24 : .1;
+    ctx.lineWidth = depth >= 0 ? .8 : .55;
+    ctx.setLineDash(depth >= 0 ? [] : [2, 3]);
+    ctx.stroke();
+  });
+  drawGridSegments(frontGrid, "#9dad9d", .3, []);
+  ctx.setLineDash([]);
+  links.forEach(({ point, target, depth }) => {
+    if (depth < 0) return;
+    ctx.beginPath();
+    ctx.moveTo(point.x, point.y);
+    ctx.lineTo(target.x, target.y);
+    ctx.strokeStyle = "#a4b99e";
+    ctx.globalAlpha = .24;
+    ctx.lineWidth = .8;
+    ctx.stroke();
+  });
+  ctx.setLineDash([]);
+
+  projected.sort((a, b) => a.depth - b.depth).forEach((point) => {
+    const front = point.depth >= 0;
+    ctx.beginPath();
+    ctx.arc(point.x, point.y, front ? 2 : 1.35, 0, Math.PI * 2);
+    ctx.fillStyle = point.color;
+    ctx.globalAlpha = front ? .92 : .3;
     ctx.fill();
     ctx.globalAlpha = 1;
-    ctx.shadowBlur = 0;
   });
-  for (let pulse = 0; pulse < 8; pulse++) {
-    const pulseIndex = Math.floor(time / 34 + pulse * 11) % points.length;
-    const a = project(points[pulseIndex]), b = project(points[(pulseIndex + 5) % points.length]);
-    const progress = (time / 1800 + pulse * .137) % 1;
-    const x = a.x + (b.x - a.x) * progress, y = a.y + (b.y - a.y) * progress;
-    const glow = ctx.createRadialGradient(x, y, 0, x, y, 12);
-    glow.addColorStop(0, "#fff8d8dd"); glow.addColorStop(.15, "#c9f36a99"); glow.addColorStop(1, "#c9f36a00");
-    ctx.fillStyle = glow; ctx.fillRect(x - 12, y - 12, 24, 24);
+
+  for (let pulse = 0; pulse < 5; pulse++) {
+    const link = links[(pulse * 17) % links.length];
+    if (!link || link.depth < 0) continue;
+    const progress = (time / 2200 + pulse * .23) % 1;
+    const x = link.point.x + (link.target.x - link.point.x) * progress;
+    const y = link.point.y + (link.target.y - link.point.y) * progress;
+    ctx.beginPath();
+    ctx.arc(x, y, 1.5, 0, Math.PI * 2);
+    ctx.fillStyle = "#f4ffd8";
+    ctx.fill();
   }
 }
 
@@ -489,7 +573,7 @@ canvas.addEventListener("pointerdown", (event) => {
 });
 canvas.addEventListener("pointermove", (event) => {
   if (!state.dragging) return;
-  state.angle += (event.clientX - state.lastX) * .009;
+  state.angle -= (event.clientX - state.lastX) * .009;
   state.tilt = Math.max(-.8, Math.min(.25, state.tilt + (event.clientY - state.lastY) * .005));
   state.lastX = event.clientX; state.lastY = event.clientY;
   if (state.view === "network" && reducedMotion.matches) drawScene();
