@@ -2,9 +2,10 @@ const $ = (selector) => document.querySelector(selector);
 const number = new Intl.NumberFormat("en-US");
 const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 const state = {
-  view: "network", page: 1, pageSize: 5, group: "All",
+  view: "network", page: 1, pageSize: 5, group: "All", protocol: "All", search: "",
   alpha: .05, logScale: true, data: null, angle: 0, tilt: -.22, zoom: 1,
   dragging: false, lastX: 0, lastY: 0, pointer: null, sceneStarted: 0,
+  flowLoading: false, refreshing: false, flowLoadId: 0,
 };
 const sceneInfo = {
   network: ["TRAFFIC TOPOLOGY / 3D NETWORK MAP", "A living network"],
@@ -12,10 +13,17 @@ const sceneInfo = {
   protocols: ["PROTOCOL MIX / TRAFFIC COMPOSITION", "Protocol signatures"],
   flows: ["CONNECTION DETAIL / LIVE RECORDS", "Flow log"],
 };
+const cameraPresets = {
+  network: { angle: 0, tilt: -.22, zoom: 1 },
+  packets: { angle: 0, tilt: .4, zoom: 1 },
+  protocols: { angle: 0, tilt: .4, zoom: 1 },
+  flows: { angle: 0, tilt: -.22, zoom: 1 },
+};
 const canvas = $("#scene-canvas");
 const ctx = canvas.getContext("2d");
 let width = 0, height = 0, pixelRatio = 1, frame = 0, previousTime = 0;
 let ambientFrame = 0;
+let flowSearchTimer = 0;
 let resumeAmbient = () => {};
 
 function esc(value) {
@@ -29,42 +37,64 @@ function fmt(value, digits = 1) {
 function compact(value) {
   return new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 }).format(value);
 }
+function resetCamera(view = state.view) {
+  Object.assign(state, cameraPresets[view] || cameraPresets.network);
+}
 async function refresh() {
+  const requestId = ++state.flowLoadId;
+  state.flowLoading = false;
+  state.refreshing = true;
+  $("#flow-view").setAttribute("aria-busy", "true");
+  $("#flow-view").classList.add("is-filtering");
   const params = new URLSearchParams({
     alpha: state.alpha, top_n: 8, page: state.page, page_size: state.pageSize,
-    group: state.group, aggregation: "median", log_scale: state.logScale,
+    group: state.group, protocol: state.protocol, search: state.search,
+    aggregation: "median", log_scale: state.logScale,
   });
   try {
     const response = await fetch(`/api/dashboard?${params}`);
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || "Dashboard data could not be loaded.");
+    if (requestId !== state.flowLoadId) return;
     state.data = data;
     render(data);
   } catch (error) {
-    $("#notices").innerHTML = `<div class="notice">${esc(error.message)}</div>`;
+    if (requestId === state.flowLoadId) $("#notices").innerHTML = `<div class="notice">${esc(error.message)}</div>`;
+  } finally {
+    if (requestId === state.flowLoadId) {
+      state.refreshing = false;
+      $("#flow-view").setAttribute("aria-busy", "false");
+      $("#flow-view").classList.remove("is-filtering");
+    }
   }
 }
 
 function render(data) {
-  $("#source").textContent = data.source.toUpperCase();
-  $("#source-detail").textContent = data.source;
-  animateNumber($("#total-count"), data.counts.all);
-  animateNumber($("#normal-count"), data.counts.normal);
-  animateNumber($("#malicious-count"), data.counts.malicious);
-  $("#packet-gap").textContent = `${data.test.difference > 0 ? "+" : ""}${compact(data.test.difference)}`;
-  const packetMax = Math.max(data.packets.normal.mean, data.packets.malicious.mean, 1);
-  $("#mean-normal").style.width = `${data.packets.normal.mean / packetMax * 100}%`;
-  $("#mean-malicious").style.width = `${data.packets.malicious.mean / packetMax * 100}%`;
-  $("#mean-normal-value").textContent = compact(data.packets.normal.mean);
-  $("#mean-malicious-value").textContent = compact(data.packets.malicious.mean);
-  $("#p-value").textContent = data.test.p < .001 ? "< .001" : fmt(data.test.p, 4);
-  $("#t-stat").textContent = fmt(data.test.t, 3);
-  $("#ci").textContent = `[${fmt(data.test.ci[0])}, ${fmt(data.test.ci[1])}]`;
-  $("#effect").textContent = `${fmt(data.test.cohens_d, 3)} · ${data.test.effect}`;
-  $("#test-decision").textContent = data.test.significant ? "SIGNIFICANT · REJECT H₀" : "NOT SIGNIFICANT · RETAIN H₀";
-  $("#test-decision").classList.toggle("nonsig", !data.test.significant);
-  renderTable(data.table);
-  renderNotices(data);
+  const packets = data?.packets || { normal: { mean: 0 }, malicious: { mean: 0 } };
+  const test = data?.test || { difference: 0, p: 1, t: 0, ci: [0, 0], cohens_d: 0, effect: "negligible", significant: false };
+  const counts = data?.counts || { all: 0, normal: 0, malicious: 0 };
+  const normalMean = Number(packets.normal?.mean ?? 0);
+  const maliciousMean = Number(packets.malicious?.mean ?? 0);
+  const packetMax = Math.max(normalMean, maliciousMean, 1);
+
+  $("#source").textContent = (data?.source || "Synthetic demo data").toUpperCase();
+  $("#source-detail").textContent = data?.source || "Synthetic demo data";
+  animateNumber($("#total-count"), counts.all);
+  animateNumber($("#normal-count"), counts.normal);
+  animateNumber($("#malicious-count"), counts.malicious);
+  $("#packet-gap").textContent = `${Number(test.difference || 0) > 0 ? "+" : ""}${compact(Number(test.difference || 0))}`;
+  $("#mean-normal").style.width = `${(normalMean / packetMax) * 100}%`;
+  $("#mean-malicious").style.width = `${(maliciousMean / packetMax) * 100}%`;
+  $("#mean-normal-value").textContent = compact(normalMean);
+  $("#mean-malicious-value").textContent = compact(maliciousMean);
+  $("#p-value").textContent = Number(test.p || 1) < .001 ? "< .001" : fmt(Number(test.p || 1), 4);
+  $("#t-stat").textContent = fmt(Number(test.t || 0), 3);
+  $("#ci").textContent = `[${fmt(Number(test.ci?.[0] ?? 0))}, ${fmt(Number(test.ci?.[1] ?? 0))}]`;
+  $("#effect").textContent = `${fmt(Number(test.cohens_d || 0), 3)} · ${test.effect || "negligible"}`;
+  $("#test-decision").textContent = test.significant ? "SIGNIFICANT · REJECT H₀" : "NOT SIGNIFICANT · RETAIN H₀";
+  $("#test-decision").classList.toggle("nonsig", !test.significant);
+  renderTable(data?.table || { page: 1, page_size: 5, pages: 1, total: 0, records: [] });
+  renderNotices(data || { source: "Synthetic demo data", duplicates: 0, issues: [] });
   state.sceneStarted = performance.now();
   animateSceneEntry();
   updateSceneLabels();
@@ -106,24 +136,79 @@ function renderNotices(data) {
   $("#notices").innerHTML = notices.join("");
 }
 
-function renderTable(table) {
-  $("#flow-deck").innerHTML = table.records.length ? table.records.map((record, index) => {
+function flowCards(records, table) {
+  return records.map((record, index) => {
     const malicious = record.group === "Malicious";
     const packets = (Number(record.spkts) || 0) + (Number(record.dpkts) || 0);
-    return `<article class="flow-card ${malicious ? "is-malicious" : "is-normal"}" style="--card-index:${index};--depth:${(table.records.length - index) * 5}px" tabindex="0">` +
-      `<div class="flow-card-top"><span class="flow-id">FLOW / ${String((table.page - 1) * table.page_size + index + 1).padStart(5, "0")}</span><span class="flow-class"><i></i>${malicious ? "MALICIOUS" : "NORMAL"}</span></div>` +
+    const signalDuration = Math.max(1.25, 4.2 - Math.log10(packets + 1)).toFixed(2);
+    const flowLabel = `${malicious ? "Malicious" : "Normal"} ${record.proto || "unknown"} flow with ${number.format(packets)} packets, ${fmt(record.dur, 3)} seconds and ${compact((Number(record.sbytes) || 0) + (Number(record.dbytes) || 0))} bytes.`;
+    const rowIndex = (table.page - 1) * table.page_size + index;
+    return `<article class="flow-card ${malicious ? "is-malicious" : "is-normal"}" style="--card-index:${rowIndex % table.page_size};--flow-index:${rowIndex};--signal-duration:${signalDuration}s" tabindex="0" role="listitem" aria-label="${esc(flowLabel)}">` +
+      `<div class="flow-card-top"><span class="flow-id">FLOW / ${String(rowIndex + 1).padStart(5, "0")}</span><span class="flow-class"><i></i>${malicious ? "MALICIOUS" : "NORMAL"}</span></div>` +
       `<div class="flow-card-main"><div class="flow-protocol"><small>PROTOCOL</small><b>${esc(record.proto || "unknown")}</b></div>` +
       `<div class="flow-measure"><small>PACKETS</small><b>${number.format(packets)}</b><span>${number.format(Number(record.spkts) || 0)} ↑ &nbsp; ${number.format(Number(record.dpkts) || 0)} ↓</span></div>` +
       `<div class="flow-measure"><small>DURATION</small><b>${fmt(record.dur, 3)}<em> sec</em></b></div>` +
       `<div class="flow-measure flow-volume"><small>PAYLOAD</small><b>${compact((Number(record.sbytes) || 0) + (Number(record.dbytes) || 0))}<em> bytes</em></b></div></div>` +
-      `<div class="flow-signal"><i></i></div></article>`;
-  }).join("") : '<div class="flow-empty">No flows match this filter.</div>';
-  const first = table.total ? (table.page - 1) * table.page_size + 1 : 0;
-  const last = Math.min(table.page * table.page_size, table.total);
-  $("#table-count").textContent = `${number.format(first)}–${number.format(last)} / ${number.format(table.total)}`;
-  $("#page-indicator").textContent = `${table.page} / ${table.pages}`;
-  $("#prev-page").disabled = table.page <= 1;
-  $("#next-page").disabled = table.page >= table.pages;
+      `<div class="flow-signal" aria-hidden="true"><i></i><i></i></div></article>`;
+  }).join("");
+}
+
+function updateFlowFooter(table) {
+  const loaded = Math.min(table.page * table.page_size, table.total);
+  $("#table-count").textContent = `${number.format(loaded)} / ${number.format(table.total)} FLOWS`;
+  $("#next-page").hidden = loaded >= table.total;
+  $("#next-page").disabled = state.flowLoading;
+  $("#next-page").textContent = state.flowLoading ? "LOADING…" : "LOAD MORE";
+}
+
+function renderTable(table) {
+  const deck = $("#flow-deck");
+  const protocolFilter = $("#protocol-filter");
+  const selectedProtocol = state.protocol;
+  protocolFilter.innerHTML = '<option value="All">All</option>' +
+    (table.protocols || []).map((protocol) => `<option value="${esc(protocol)}">${esc(protocol.toUpperCase())}</option>`).join("");
+  protocolFilter.value = selectedProtocol;
+  deck.innerHTML = table.records.length
+    ? flowCards(table.records, table)
+    : '<div class="flow-empty">No flows match this filter.</div>';
+  deck.scrollTop = 0;
+  updateFlowFooter(table);
+}
+
+async function loadMoreFlows() {
+  const table = state.data?.table;
+  if (!table || state.refreshing || state.flowLoading || state.page >= table.pages) return;
+
+  const requestId = ++state.flowLoadId;
+  const page = state.page + 1;
+  state.flowLoading = true;
+  updateFlowFooter(table);
+  const params = new URLSearchParams({
+    alpha: state.alpha, top_n: 8, page, page_size: state.pageSize,
+    group: state.group, protocol: state.protocol, search: state.search,
+    aggregation: "median", log_scale: state.logScale,
+  });
+  try {
+    const response = await fetch(`/api/dashboard?${params}`);
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "More flows could not be loaded.");
+    if (requestId !== state.flowLoadId) return;
+    state.page = page;
+    state.data = data;
+    const deck = $("#flow-deck");
+    deck.querySelector(".flow-empty")?.remove();
+    deck.insertAdjacentHTML("beforeend", flowCards(data.table.records, data.table));
+    updateFlowFooter(data.table);
+    updateSceneLabels();
+  } catch (error) {
+    if (requestId !== state.flowLoadId) return;
+    $("#notices").innerHTML = `<div class="notice">${esc(error.message)}</div>`;
+  } finally {
+    if (requestId === state.flowLoadId) {
+      state.flowLoading = false;
+      if (state.data) updateFlowFooter(state.data.table);
+    }
+  }
 }
 
 function updateSceneLabels() {
@@ -146,7 +231,8 @@ function updateSceneLabels() {
   $("#scene-vignette").hidden = state.view === "flows";
   $("#flow-view").hidden = state.view !== "flows";
   $("#scene-value-a").textContent = state.view === "flows" ? state.group.toUpperCase() : $("#normal-count").textContent;
-  $("#scene-value-b").textContent = state.view === "flows" ? `${state.data?.table.records.length ?? 0} SHOWN` : $("#malicious-count").textContent;
+  const visibleFlows = state.data ? Math.min(state.page * state.pageSize, state.data.table.total) : 0;
+  $("#scene-value-b").textContent = state.view === "flows" ? `${visibleFlows} SHOWN` : $("#malicious-count").textContent;
   const active = $(`.tab[data-view="${state.view}"]`);
   document.querySelectorAll(".tab").forEach((tab) => {
     const selected = tab === active;
@@ -284,11 +370,8 @@ function drawBars(time) {
   const floor = -2.35;
   const elapsed = reducedMotion.matches ? 1000 : Math.max(0, time - state.sceneStarted);
   const progress = 1 - (1 - Math.min(1, elapsed / 780)) ** 3;
-  const ordered = groups.map((group, index) => {
-    const depth = project({ x: group.x, y: 0, z: 0 }).depth;
-    return { ...group, index, depth };
-  }).sort((a, b) => a.depth - b.depth);
-  ordered.forEach((group, index) => {
+  const columns = [];
+  groups.forEach((group, index) => {
     const factor = state.logScale && state.view === "packets"
       ? Math.log1p(Math.max(0, group.normal)) / Math.log1p(maximum)
       : group.normal / maximum;
@@ -297,9 +380,16 @@ function drawBars(time) {
       : group.malicious / maximum;
     const normalHeight = (.16 + factor * 3) * progress;
     const maliciousHeight = (.16 + maliciousFactor * 3) * progress;
-    drawCube(group.x, -.58, normalHeight, "#c9f36a", time, group.index);
-    drawCube(group.x, .58, maliciousHeight, "#ff765e", time, group.index + 2.5);
-    const label = state.view === "packets" ? String(group.index + 1).padStart(2, "0") : group.name;
+    columns.push(
+      { x: group.x, z: -.68, height: normalHeight, color: "#c9f36a", phase: index, depth: project({ x: group.x, y: floor + normalHeight / 2, z: -.68 }).depth },
+      { x: group.x, z: .68, height: maliciousHeight, color: "#ff765e", phase: index + 2.5, depth: project({ x: group.x, y: floor + maliciousHeight / 2, z: .68 }).depth },
+    );
+  });
+  columns.sort((a, b) => a.depth - b.depth).forEach((column) => {
+    drawCube(column.x, column.z, column.height, column.color, time, column.phase);
+  });
+  groups.forEach((group, index) => {
+    const label = state.view === "packets" ? String(index + 1).padStart(2, "0") : group.name;
     const p = project({ x: group.x, y: floor - .22, z: 0 });
     ctx.save();
     ctx.fillStyle = "#849088";
@@ -482,7 +572,7 @@ function drawScene(time = 0) {
 function animate(time) {
   const elapsed = previousTime ? time - previousTime : 16;
   previousTime = time;
-  if (state.view !== "flows") state.angle += elapsed * .000018;
+  if (state.view === "network") state.angle += elapsed * .000018;
   drawScene(time);
   if (state.view !== "flows" && !document.hidden && !reducedMotion.matches) frame = requestAnimationFrame(animate);
 }
@@ -495,8 +585,10 @@ document.addEventListener("visibilitychange", () => {
 });
 
 function switchView(view) {
+  if (view !== state.view) resetCamera(view);
   state.view = view;
   updateSceneLabels();
+  syncInspectorState();
   animateSceneEntry();
   state.sceneStarted = performance.now();
   if (view === "flows") cancelAnimationFrame(frame);
@@ -563,15 +655,40 @@ document.querySelectorAll(".tab").forEach((tab) => {
     switchView(tabs[next].dataset.view);
   });
 });
-$("#alpha").addEventListener("change", (event) => { state.alpha = Number(event.target.value); refresh(); });
-$("#log-scale").addEventListener("change", (event) => { state.logScale = event.target.checked; if (state.data) drawScene(); });
-$("#group-filter").addEventListener("change", (event) => { state.group = event.target.value; state.page = 1; refresh(); });
-$("#prev-page").addEventListener("click", () => { if (state.page > 1) { state.page--; refresh(); } });
-$("#next-page").addEventListener("click", () => { if (state.data && state.page < state.data.table.pages) { state.page++; refresh(); } });
-canvas.addEventListener("pointerdown", (event) => {
-  state.dragging = true; state.lastX = event.clientX; state.lastY = event.clientY; canvas.setPointerCapture(event.pointerId);
-});
-canvas.addEventListener("pointermove", (event) => {
+$(const closeButton = document.querySelector(".inspector-close");
+  if (!toggle) return;
+  const isMobile = window.matchMedia("(max-width: 520px)").matches;
+  const canShow = isMobile && state.view !== "flows";
+  if (!canShow) document.body.classList.remove("inspector-open");
+  const open = canShow && document.body.classList.contains("inspector-open");
+  toggle.hidden = !canShow;
+  toggle.setAttribute("aria-expanded", String(open));
+  toggle.querySelector(".inspector-toggle-text").textContent = open ? "Hide metrics" : "Metrics";
+  if (closeButton) {
+    closeButton.hidden = !canShow || !open;
+    closeButton.setAttribute("aria-expanded", String(open));
+  }
+}
+
+function init() {
+  installAmbient();
+  resizeCanvas();
+  updateSceneLabels();
+  refresh();
+  const inspectorToggle = document.getElementById("inspector-toggle");
+  const inspector = document.getElementById("data-inspector");
+  const closeButton = document.querySelector(".inspector-close");
+  const setInspectorOpen = (open) => {
+    document.body.classList.toggle("inspector-open", open);
+    syncInspectorState();
+  };
+  if (inspectorToggle) {
+    inspectorToggle.addEventListener("click", () => {
+      setInspectorOpen(!document.body.classList.contains("inspector-open"));
+    });
+  }
+  if (closeButton) {
+    closeButton.addEventListener("click", () => setInspectorOpen(false)s.addEventListener("pointermove", (event) => {
   if (!state.dragging) return;
   state.angle -= (event.clientX - state.lastX) * .009;
   state.tilt = Math.max(-.8, Math.min(.25, state.tilt + (event.clientY - state.lastY) * .005));
@@ -580,6 +697,25 @@ canvas.addEventListener("pointermove", (event) => {
 });
 canvas.addEventListener("pointerup", () => { state.dragging = false; });
 canvas.addEventListener("pointercancel", () => { state.dragging = false; });
+canvas.addEventListener("keydown", (event) => {
+  const step = event.shiftKey ? .22 : .12;
+  const isZoomKey = event.key === "+" || event.key === "=" || event.key === "-" || event.key === "_";
+  if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "PageUp", "PageDown"].includes(event.key) || isZoomKey) {
+    event.preventDefault();
+  }
+  if (event.key === "ArrowLeft") state.angle += step;
+  if (event.key === "ArrowRight") state.angle -= step;
+  if (event.key === "ArrowUp") state.tilt = Math.max(-.8, state.tilt - .08);
+  if (event.key === "ArrowDown") state.tilt = Math.min(.25, state.tilt + .08);
+  if (event.key === "+" || event.key === "=" || event.key === "PageUp") state.zoom = Math.max(.72, Math.min(1.45, state.zoom + .06));
+  if (event.key === "-" || event.key === "_" || event.key === "PageDown") state.zoom = Math.max(.72, Math.min(1.45, state.zoom - .06));
+  if (event.key === "Home") {
+    state.angle = 0;
+    state.tilt = cameraPresets[state.view].tilt;
+    state.zoom = 1;
+  }
+  if (reducedMotion.matches) drawScene();
+});
 canvas.addEventListener("wheel", (event) => {
   event.preventDefault();
   state.zoom = Math.max(.72, Math.min(1.45, state.zoom - Math.sign(event.deltaY) * .05));
@@ -600,11 +736,47 @@ reducedMotion.addEventListener("change", () => {
   }
 });
 
+function syncInspectorState() {
+  const toggle = document.getElementById("inspector-toggle");
+  if (!toggle) return;
+  const isMobile = window.matchMedia("(max-width: 520px)").matches;
+  const canShow = isMobile && state.view !== "flows";
+  if (!canShow) document.body.classList.remove("inspector-open");
+  const open = canShow && document.body.classList.contains("inspector-open");
+  toggle.hidden = !canShow;
+  toggle.setAttribute("aria-expanded", String(open));
+  toggle.querySelector(".inspector-toggle-text").textContent = open ? "Hide metrics" : "Metrics";
+}
+
 function init() {
   installAmbient();
   resizeCanvas();
   updateSceneLabels();
   refresh();
+  const inspectorToggle = document.getElementById("inspector-toggle");
+  const inspector = document.getElementById("data-inspector");
+  const setInspectorOpen = (open) => {
+    document.body.classList.toggle("inspector-open", open);
+    syncInspectorState();
+  };
+  if (inspectorToggle) {
+    inspectorToggle.addEventListener("click", () => {
+      setInspectorOpen(!document.body.classList.contains("inspector-open"));
+    });
+  }
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && document.body.classList.contains("inspector-open")) {
+      setInspectorOpen(false);
+    }
+  });
+  document.addEventListener("pointerdown", (event) => {
+    const isMobile = window.matchMedia("(max-width: 520px)").matches;
+    if (!isMobile || !document.body.classList.contains("inspector-open")) return;
+    if (inspector?.contains(event.target) || inspectorToggle?.contains(event.target)) return;
+    setInspectorOpen(false);
+  });
+  window.addEventListener("resize", syncInspectorState);
+  syncInspectorState();
   if (!reducedMotion.matches) frame = requestAnimationFrame(animate);
 }
 init();

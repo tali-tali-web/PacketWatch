@@ -161,6 +161,8 @@ def dashboard(params):
     page = int(params.get("page", ["1"])[0])
     page_size = int(params.get("page_size", ["10"])[0])
     group = params.get("group", ["All"])[0]
+    protocol = params.get("protocol", ["All"])[0]
+    search = params.get("search", [""])[0].strip()
     aggregation = params.get("aggregation", ["median"])[0]
     log_value = params.get("log_scale", ["true"])[0].lower()
     if alpha not in (.01, .05, .1):
@@ -171,12 +173,25 @@ def dashboard(params):
         raise ValueError("Page or page size is out of range.")
     if group not in ("All", "Normal", "Malicious"):
         raise ValueError("Traffic group must be All, Normal, or Malicious.")
+    protocols = sorted(DATA["proto"].dropna().astype(str).str.lower().unique())
+    if protocol != "All" and protocol not in protocols:
+        raise ValueError("Unknown protocol filter.")
+    if len(search) > 80:
+        raise ValueError("Flow search must be 80 characters or fewer.")
     if aggregation not in ("mean", "median"):
         raise ValueError("Aggregation must be mean or median.")
     if log_value not in ("true", "false"):
         raise ValueError("Log scale must be true or false.")
 
     selected = DATA if group == "All" else DATA.loc[DATA["group"] == group]
+    if protocol != "All":
+        selected = selected.loc[selected["proto"].astype(str).str.lower() == protocol]
+    if search:
+        searchable = [column for column in ("proto", "service", "state", "attack_cat", "group") if column in selected.columns]
+        matches = selected[searchable].astype("string").apply(
+            lambda column: column.str.contains(search, case=False, na=False, regex=False)
+        ).any(axis=1)
+        selected = selected.loc[matches]
     start = (page - 1) * page_size
     columns = [
         column for column in (
@@ -222,6 +237,7 @@ def dashboard(params):
             "page_size": page_size,
             "pages": max(1, math.ceil(len(selected) / page_size)),
             "total": int(len(selected)),
+            "protocols": protocols,
             "records": records,
         },
     }
